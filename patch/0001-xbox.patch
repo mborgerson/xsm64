@@ -1,0 +1,366 @@
+From 7e7a959bd6faaa3ac1dc555d3c0c6638b9be6089 Mon Sep 17 00:00:00 2001
+From: xbox <xbox>
+Date: Sun, 4 Oct 2020 16:56:16 -0700
+Subject: [PATCH] xbox
+
+---
+ Makefile                                   | 62 ++++++++++++++++++++--
+ include/PR/os_libc.h                       |  6 +++
+ src/engine/math_util.h                     |  5 ++
+ src/game/paintings.c                       |  1 +
+ src/pc/audio/audio_sdl.c                   |  4 +-
+ src/pc/audio/audio_wasapi.cpp              |  2 +-
+ src/pc/audio/audio_wasapi.h                |  2 +-
+ src/pc/controller/controller_entry_point.c |  4 +-
+ src/pc/controller/controller_sdl.c         | 11 +++-
+ src/pc/controller/controller_xinput.c      |  2 +-
+ src/pc/controller/controller_xinput.h      |  2 +-
+ src/pc/controller/wup.c                    |  2 +-
+ src/pc/dlmalloc.c                          |  2 +-
+ src/pc/gfx/gfx_pc.c                        |  6 +++
+ src/pc/pc_main.c                           | 28 +++++++++-
+ src/pc/ultra_reimplementation.c            | 12 +++++
+ 16 files changed, 135 insertions(+), 16 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index ab0dff3..b6c6847 100644
+--- a/Makefile
++++ b/Makefile
+@@ -32,3 +32,8 @@ ifeq ($(TARGET_N64),0)
+   TARGET_WINDOWS := 0
+-  ifeq ($(TARGET_WEB),0)
++  ifeq ($(TARGET_XBOX), 1)
++    # No further detection needed
++    XBE_TITLE = sm64
++    NXDK_SDL = y
++    NXDK_DIR = $(CURDIR)/nxdk/
++  else ifeq ($(TARGET_WEB),0)
+     ifeq ($(OS),Windows_NT)
+@@ -48,2 +53,4 @@ ifeq ($(TARGET_N64),0)
+     endif
++  else ifeq ($(TARGET_XBOX),1)
++    # Nothing to do, Xbox graphics enabled by default
+   else
+@@ -112,3 +119,8 @@ TARGET := sm64.$(VERSION)
+ VERSION_CFLAGS := -D$(VERSION_DEF)
+-VERSION_ASFLAGS := --defsym $(VERSION_DEF)=1
++ifeq ($(TARGET_XBOX),1)
++  # Not supported by clang assembler
++  VERSION_ASFLAGS :=
++else
++  VERSION_ASFLAGS := --defsym $(VERSION_DEF)=1
++endif
+ 
+@@ -207,2 +219,5 @@ EXE := $(BUILD_DIR)/$(TARGET).exe
+ else
++ifeq ($(TARGET_XBOX),1)
++EXE := main.exe
++else
+ EXE := $(BUILD_DIR)/$(TARGET)
+@@ -210,2 +225,3 @@ endif
+ endif
++endif
+ ROM := $(BUILD_DIR)/$(TARGET).z64
+@@ -349,2 +365,7 @@ SEG_FILES := $(SEGMENT_ELF_FILES) $(ACTOR_ELF_FILES) $(LEVEL_ELF_FILES)
+ 
++ifeq ($(TARGET_XBOX), 1)
++  include $(NXDK_DIR)/Makefile
++  OBJS += $(O_FILES) $(MIO0_FILES:.mio0=.o) $(SOUND_OBJ_FILES) $(ULTRA_O_FILES) $(GODDARD_O_FILES)
++endif
++
+ ##################### Compiler Options #######################
+@@ -396,3 +417,7 @@ INCLUDE_CFLAGS := -I include -I $(BUILD_DIR) -I $(BUILD_DIR)/include -I src -I .
+ # Check code syntax with host compiler
+-CC_CHECK := gcc
++ifeq ($(TARGET_XBOX),1)
++  CC_CHECK := clang
++else
++  CC_CHECK := gcc
++endif
+ CC_CHECK_CFLAGS := -fsyntax-only -fsigned-char $(CC_CFLAGS) $(TARGET_CFLAGS) $(INCLUDE_CFLAGS) -std=gnu90 -Wall -Wextra -Wno-format-security -Wno-main -DNON_MATCHING -DAVOID_UB $(VERSION_CFLAGS) $(GRUCODE_CFLAGS)
+@@ -437,2 +462,10 @@ else
+ endif
++ifeq ($(TARGET_XBOX),1)
++  LD  = lld -flavor link
++  LIB = llvm-lib
++  AS  = clang
++  CC  = clang
++  CXX = clang++
++endif
++
+ CPP := cpp -P
+@@ -455,2 +488,7 @@ ifeq ($(TARGET_WEB),1)
+ endif
++ifeq ($(TARGET_XBOX),1)
++  PLATFORM_CFLAGS := -DTARGET_XBOX -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function $(NXDK_CFLAGS)
++  PLATFORM_LDLAGS :=
++endif
++
+ 
+@@ -487,3 +525,7 @@ GFX_CFLAGS += -DWIDESCREEN
+ CC_CHECK := $(CC) -fsyntax-only -fsigned-char $(INCLUDE_CFLAGS) -Wall -Wextra -Wno-format-security -D_LANGUAGE_C $(VERSION_CFLAGS) $(MATCH_CFLAGS) $(PLATFORM_CFLAGS) $(GFX_CFLAGS) $(GRUCODE_CFLAGS)
++ifeq ($(TARGET_XBOX),1)
++CFLAGS := $(OPT_FLAGS) $(INCLUDE_CFLAGS) -D_LANGUAGE_C $(VERSION_CFLAGS) $(MATCH_CFLAGS) $(PLATFORM_CFLAGS) $(GFX_CFLAGS) $(GRUCODE_CFLAGS) -fno-strict-aliasing -fwrapv
++else
+ CFLAGS := $(OPT_FLAGS) $(INCLUDE_CFLAGS) -D_LANGUAGE_C $(VERSION_CFLAGS) $(MATCH_CFLAGS) $(PLATFORM_CFLAGS) $(GFX_CFLAGS) $(GRUCODE_CFLAGS) -fno-strict-aliasing -fwrapv -march=native
++endif
+ 
+@@ -491,2 +533,6 @@ ASFLAGS := -I include -I $(BUILD_DIR) $(VERSION_ASFLAGS)
+ 
++ifeq ($(TARGET_XBOX),1)
++ASFLAGS := $(ASFLAGS) $(NXDK_ASFLAGS)
++endif
++
+ LDFLAGS := $(PLATFORM_LDFLAGS) $(GFX_LDFLAGS)
+@@ -798,4 +844,9 @@ $(BUILD_DIR)/%.o: $(BUILD_DIR)/%.c
+ 
++ifeq ($(TARGET_XBOX),1)
++$(BUILD_DIR)/%.o: %.s
++	$(AS) $(ASFLAGS) -c -o $@ $<
++else
+ $(BUILD_DIR)/%.o: %.s
+ 	$(AS) $(ASFLAGS) -MD $(BUILD_DIR)/$*.d -o $@ $<
++endif
+ 
+@@ -823,2 +874,6 @@ $(BUILD_DIR)/$(TARGET).objdump: $(ELF)
+ else
++
++ifeq ($(TARGET_XBOX),1)
++$(EXE): $(O_FILES) $(MIO0_FILES:.mio0=.o) $(SOUND_OBJ_FILES) $(ULTRA_O_FILES) $(GODDARD_O_FILES)
++else
+ $(EXE): $(O_FILES) $(MIO0_FILES:.mio0=.o) $(SOUND_OBJ_FILES) $(ULTRA_O_FILES) $(GODDARD_O_FILES)
+@@ -827,2 +882,3 @@ endif
+ 
++endif
+ 
+diff --git a/include/PR/os_libc.h b/include/PR/os_libc.h
+index 94111c0..2e61174 100644
+--- a/include/PR/os_libc.h
++++ b/include/PR/os_libc.h
+@@ -9,2 +9,8 @@ extern void bzero(void *, size_t);
+ 
++#ifdef TARGET_XBOX
++#include <string.h>
++#define bcopy(src, dst, size) memcpy(dst, src, size)
++#define bzero(dst, size) memset(dst, 0, size)
++#endif
++
+ #endif /* !_OS_LIBC_H_ */
+diff --git a/src/engine/math_util.h b/src/engine/math_util.h
+index cb37d52..54ad8ac 100644
+--- a/src/engine/math_util.h
++++ b/src/engine/math_util.h
+@@ -6,2 +6,3 @@
+ #include "types.h"
++#include <libc/math.h>
+ 
+@@ -34,2 +35,6 @@ extern f32 gCosineTable[];
+ 
++#ifdef TARGET_XBOX // FIXME: Hack for name collision
++#define atan2f atan2f_sm64
++#endif
++
+ void *vec3f_copy(Vec3f dest, Vec3f src);
+diff --git a/src/game/paintings.c b/src/game/paintings.c
+index 83bd2ce..1ee22f7 100644
+--- a/src/game/paintings.c
++++ b/src/game/paintings.c
+@@ -1,2 +1,3 @@
+ #include <PR/ultratypes.h>
++#include <libc/math.h>
+ 
+diff --git a/src/pc/audio/audio_sdl.c b/src/pc/audio/audio_sdl.c
+index 3f020f9..1928211 100644
+--- a/src/pc/audio/audio_sdl.c
++++ b/src/pc/audio/audio_sdl.c
+@@ -1,4 +1,4 @@
+-#if !defined(_WIN32) && !defined(_WIN64)
++#if defined(TARGET_XBOX) || !defined(_WIN32) && !defined(_WIN64)
+ 
+-#ifdef __MINGW32__
++#if defined(TARGET_XBOX) || defined(__MINGW32__)
+ #include "SDL.h"
+diff --git a/src/pc/audio/audio_wasapi.cpp b/src/pc/audio/audio_wasapi.cpp
+index 2783fd0..bf00ce7 100644
+--- a/src/pc/audio/audio_wasapi.cpp
++++ b/src/pc/audio/audio_wasapi.cpp
+@@ -1,2 +1,2 @@
+-#if defined(_WIN32) || defined(_WIN64)
++#if !defined(TARGET_XBOX) && (defined(_WIN32) || defined(_WIN64))
+ 
+diff --git a/src/pc/audio/audio_wasapi.h b/src/pc/audio/audio_wasapi.h
+index b0aab11..14c12e0 100644
+--- a/src/pc/audio/audio_wasapi.h
++++ b/src/pc/audio/audio_wasapi.h
+@@ -3,3 +3,3 @@
+ 
+-#if defined(_WIN32) || defined(_WIN64)
++#if !defined(TARGET_XBOX) && (defined(_WIN32) || defined(_WIN64))
+ #include "audio_api.h"
+diff --git a/src/pc/controller/controller_entry_point.c b/src/pc/controller/controller_entry_point.c
+index f86cf0d..6d0207e 100644
+--- a/src/pc/controller/controller_entry_point.c
++++ b/src/pc/controller/controller_entry_point.c
+@@ -8,3 +8,3 @@
+ 
+-#if defined(_WIN32) || defined(_WIN64)
++#if !defined(TARGET_XBOX) && (defined(_WIN32) || defined(_WIN64))
+ #include "controller_xinput.h"
+@@ -20,3 +20,3 @@ static struct ControllerAPI *controller_implementations[] = {
+     &controller_recorded_tas,
+-#if defined(_WIN32) || defined(_WIN64)
++#if !defined(TARGET_XBOX) && (defined(_WIN32) || defined(_WIN64))
+     &controller_xinput,
+diff --git a/src/pc/controller/controller_sdl.c b/src/pc/controller/controller_sdl.c
+index c3ab242..f0f1805 100644
+--- a/src/pc/controller/controller_sdl.c
++++ b/src/pc/controller/controller_sdl.c
+@@ -1,2 +1,2 @@
+-#if !defined(_WIN32) && !defined(_WIN64)
++#if defined(TARGET_XBOX) || (!defined(_WIN32) && !defined(_WIN64))
+ 
+@@ -7,3 +7,8 @@
+ 
++#ifdef TARGET_XBOX
++#include <SDL.h>
++extern int g_xbox_exit_button_state;
++#else
+ #include <SDL2/SDL.h>
++#endif
+ 
+@@ -94,2 +99,6 @@ static void controller_sdl_read(OSContPad *pad) {
+     }
++
++#ifdef TARGET_XBOX
++    g_xbox_exit_button_state = SDL_GameControllerGetButton(sdl_cntrl, SDL_CONTROLLER_BUTTON_BACK);
++#endif
+ }
+diff --git a/src/pc/controller/controller_xinput.c b/src/pc/controller/controller_xinput.c
+index bb44bc1..fb5b3c4 100644
+--- a/src/pc/controller/controller_xinput.c
++++ b/src/pc/controller/controller_xinput.c
+@@ -1,2 +1,2 @@
+-#if defined(_WIN32) || defined(_WIN64)
++#if !defined(TARGET_XBOX) && (defined(_WIN32) || defined(_WIN64))
+ 
+diff --git a/src/pc/controller/controller_xinput.h b/src/pc/controller/controller_xinput.h
+index be1e68c..2f3309a 100644
+--- a/src/pc/controller/controller_xinput.h
++++ b/src/pc/controller/controller_xinput.h
+@@ -3,3 +3,3 @@
+ 
+-#if defined(_WIN32) || defined(_WIN64)
++#if !defined(TARGET_XBOX) && (defined(_WIN32) || defined(_WIN64))
+ 
+diff --git a/src/pc/controller/wup.c b/src/pc/controller/wup.c
+index 9de54c1..7ee33b4 100644
+--- a/src/pc/controller/wup.c
++++ b/src/pc/controller/wup.c
+@@ -1,2 +1,2 @@
+-#if !defined(__MINGW32__) && !defined(__BSD__) && !defined(TARGET_WEB)
++#if !defined(TARGET_XBOX) && !defined(__MINGW32__) && !defined(__BSD__) && !defined(TARGET_WEB)
+ // See LICENSE for license
+diff --git a/src/pc/dlmalloc.c b/src/pc/dlmalloc.c
+index 27322a6..e0e44e1 100644
+--- a/src/pc/dlmalloc.c
++++ b/src/pc/dlmalloc.c
+@@ -3,3 +3,3 @@
+ // milliseconds to tens of microseconds.
+-#ifdef _WIN32
++#if !defined(XBOX) && defined(_WIN32)
+ #include <errno.h>
+diff --git a/src/pc/gfx/gfx_pc.c b/src/pc/gfx/gfx_pc.c
+index 15d7b94..8ffb923 100644
+--- a/src/pc/gfx/gfx_pc.c
++++ b/src/pc/gfx/gfx_pc.c
+@@ -160,2 +160,7 @@ static struct GfxRenderingAPI *gfx_rapi;
+ 
++#ifdef TARGET_XBOX
++static unsigned long get_time(void) {
++    return GetTickCount() * 1000;
++}
++#else
+ #include <time.h>
+@@ -166,2 +171,3 @@ static unsigned long get_time(void) {
+ }
++#endif
+ 
+diff --git a/src/pc/pc_main.c b/src/pc/pc_main.c
+index 85b1701..5680d2d 100644
+--- a/src/pc/pc_main.c
++++ b/src/pc/pc_main.c
+@@ -20,2 +20,3 @@
+ #include "gfx/gfx_dummy.h"
++#include "gfx/gfx_xbox.h"
+ 
+@@ -36,2 +37,8 @@
+ 
++#ifdef TARGET_XBOX
++#include <hal/debug.h>
++#include <hal/video.h>
++#include <windows.h>
++#endif
++
+ OSMesg D_80339BEC;
+@@ -173,2 +180,5 @@ void main_func(void) {
+     #endif
++#elif defined(TARGET_XBOX)
++    rendering_api = &gfx_xbox_renderer_api;
++    wm_api = &gfx_xbox_wm_api;
+ #elif defined(ENABLE_GFX_DUMMY)
+@@ -198,3 +208,3 @@ void main_func(void) {
+ #endif
+-#ifdef TARGET_WEB
++#if defined(TARGET_WEB) || defined(TARGET_XBOX)
+     if (audio_api == NULL && audio_sdl.init()) {
+@@ -224,3 +234,17 @@ void main_func(void) {
+ 
+-#if defined(_WIN32) || defined(_WIN64)
++#if defined(TARGET_XBOX)
++#include <nxdk/mount.h>
++#include <winapi/fileapi.h>
++#include "xbox.h"
++int main(void)
++{
++    if (!nxIsDriveMounted('E')) {
++        nxMountDrive('E', "\\Device\\Harddisk0\\Partition1\\");
++    }
++    CreateDirectoryA(USER_DATA_TITLE_PATH, NULL);
++    CreateDirectoryA(USER_DATA_SAVE_PATH, NULL);
++    main_func();
++    return 0;
++}
++#elif defined(_WIN32) || defined(_WIN64)
+ #include <windows.h>
+diff --git a/src/pc/ultra_reimplementation.c b/src/pc/ultra_reimplementation.c
+index 2b28ea8..77ce337 100644
+--- a/src/pc/ultra_reimplementation.c
++++ b/src/pc/ultra_reimplementation.c
+@@ -9,2 +9,6 @@
+ 
++#ifdef TARGET_XBOX
++#include "xbox.h"
++#endif
++
+ extern OSMgrArgs piMgrArgs;
+@@ -147,4 +151,8 @@ s32 osEepromLongRead(UNUSED OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes)
+     }
++#else
++#ifdef TARGET_XBOX
++    FILE *fp = fopen(USER_DATA_SAVE_PATH "\\sm64_save_file.bin", "rb");
+ #else
+     FILE *fp = fopen("sm64_save_file.bin", "rb");
++#endif
+     if (fp == NULL) {
+@@ -177,4 +185,8 @@ s32 osEepromLongWrite(UNUSED OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes
+     s32 ret = 0;
++#else
++#ifdef TARGET_XBOX
++    FILE* fp = fopen(USER_DATA_SAVE_PATH "\\sm64_save_file.bin", "wb");
+ #else
+     FILE* fp = fopen("sm64_save_file.bin", "wb");
++#endif
+     if (fp == NULL) {
+-- 
+2.25.1
+
