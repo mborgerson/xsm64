@@ -1,6 +1,6 @@
 A super minimal rendering backend for Xbox
 
-Built using the nxdk (open-source Xbox SDK), you will need to [install nxdk dependencies](https://github.com/XboxDev/nxdk/wiki/Install-the-Prerequisites#ubuntu) before building this.
+Built using nxdk (open-source Xbox SDK), you will need to [install nxdk dependencies](https://github.com/XboxDev/nxdk/wiki/Install-the-Prerequisites#ubuntu) before building this.
 
 Integrating with an upstream project might look like:
 ```bash
