@@ -1,6 +1,6 @@
 #ifdef TARGET_XBOX
 
-#define SHOW_FPS 0
+#define SHOW_DBG_INFO 0
 #define WIREFRAME 0
 
 #include <time.h>
@@ -63,10 +63,6 @@ static bool is_pow_2(int x)
 int g_xbox_exit_button_state;
 
 static int g_width, g_height;
-#if SHOW_FPS
-static int g_start, g_last, g_now;
-static int g_fps, g_frames, g_frames_total;
-#endif
 
 #define SHADER_POOL_SIZE 64
 
@@ -81,6 +77,10 @@ struct ShaderProgram {
 static struct ShaderProgram g_shader_pool[SHADER_POOL_SIZE];
 static uint8_t g_shader_cnt = 0;
 static struct ShaderProgram *g_cur_shader;
+#if SHOW_DBG_INFO
+static uint64_t g_frame_start_tsc;
+static uint64_t g_frame_to_frame_tsc;
+#endif
 
 #define TEX_POOL_SIZE 512
 #define SWIZZLE_BUF_SIDE_LEN 256
@@ -142,6 +142,13 @@ static void matrix_viewport(
 
 static void gfx_xbox_wm_init(const char *game_name, bool start_in_fullscreen)
 {
+    BOOL success;
+
+    // Try 720p mode
+    success = XVideoSetMode(1280, 720, 32, REFRESH_DEFAULT);
+    if (success) return;
+
+    // 480 always available
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
 }
 
@@ -228,12 +235,40 @@ static struct timespec gfx_xbox_wm_timeadd(
     return t1;
 }
 
+static uint64_t rdtsc(void)
+{
+    unsigned hi, lo;
+    asm volatile ("rdtsc" : "=d" (hi), "=a" (lo));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static unsigned tsc_to_us(uint64_t tsc)
+{
+    return tsc/733;
+}
+
+static uint64_t us_to_tsc(int us)
+{
+    return us*733;
+}
+
 static void gfx_xbox_wm_swap_buffers_end(void)
 {
-    // XXX: Waiting for 2 VBL to run at 30Hz.  This could be nicer, but it
-    // works well enough
-    pb_wait_for_vbl();
-    pb_wait_for_vbl();
+    // A naive sync up to run at 30Hz by measuring against the 60Hz native
+    // vblank interval
+    static int last = 0;
+    int now = pb_get_vbl_counter();
+    while ((now - last) < 2) {
+        now = pb_wait_for_vbl();
+    }
+    last = now;
+
+#if SHOW_DBG_INFO
+    static uint64_t last_ts;
+    uint64_t ts = rdtsc();
+    g_frame_to_frame_tsc = ts - last_ts;
+    last_ts = ts;
+#endif
 }
 
 static double gfx_xbox_wm_get_time(void)
@@ -666,7 +701,7 @@ static void gfx_xbox_renderer_set_use_alpha(bool use_alpha) {
 
 static void gfx_xbox_renderer_init(void)
 {
-    pb_init();
+    assert(pb_init() == 0);
     pb_show_front_screen();
 
     g_width = pb_back_buffer_width();
@@ -675,11 +710,6 @@ static void gfx_xbox_renderer_init(void)
     g_swizzle_buf = MmAllocateContiguousMemoryEx(
         SWIZZLE_BUF_SIDE_LEN*SWIZZLE_BUF_SIDE_LEN*4, 0, MAXRAM, 0, 0x404);
     assert(g_swizzle_buf != NULL);
-
-#if SHOW_FPS
-    g_start = g_now = g_last = GetTickCount();
-    g_frames_total = g_frames = g_fps = 0;
-#endif
 
     float m_identity[4][4];
     matrix_identity(m_identity);
@@ -723,11 +753,14 @@ static void gfx_xbox_renderer_on_resize(void)
 
 static void gfx_xbox_renderer_start_frame(void)
 {
+#if SHOW_DBG_INFO
+    g_frame_start_tsc = rdtsc();
+#endif
+
     pb_reset();
     pb_target_back_buffer();
     pb_erase_depth_stencil_buffer(0, 0, g_width, g_height);
     pb_fill(0, 0, g_width, g_height, 0x00000000);
-    pb_erase_text_screen();
 
     uint32_t *p = pb_begin();
     pb_push(p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16);
@@ -747,12 +780,14 @@ static void gfx_xbox_renderer_draw_triangles(
     assert(num_vertices <= 0xffff);
     assert(g_cur_shader != NULL);
 
-    while(pb_busy()) {}
-
     // FIXME: Restructure loop to not have conditions inside
     uint32_t *p = pb_begin();
     p = pb_push1(p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLES);
+    pb_end(p);
+
     for (unsigned int v = 0; v < num_vertices; v++) {
+        p = pb_begin();
+
         float *vp = &buf_vbo[v*size_of_vert];
 
         // POSITION is specified first, but we stream it in last
@@ -825,8 +860,11 @@ static void gfx_xbox_renderer_draw_triangles(
         *(float*)(p++) = position[1];
         *(float*)(p++) = position[2];
         *(float*)(p++) = position[3];
+
+        pb_end(p);
     }
 
+    p = pb_begin();
     p = pb_push1(p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END);
     pb_end(p);
 }
@@ -837,26 +875,34 @@ static void gfx_xbox_renderer_end_frame(void)
 
 static void gfx_xbox_renderer_finish_render(void)
 {
-        while(pb_busy());
+#if SHOW_DBG_INFO
+    static int last_updated = 0;
+    static MM_STATISTICS mem_stats;
 
-#if SHOW_FPS
-        pb_print("FPS: %d (%d)", g_fps, g_frames_total);
-        pb_draw_text_screen();
+    while(pb_busy());    
+    uint64_t frame_end_tsc = rdtsc();
+
+    // Update select info every second
+    int now = GetTickCount();
+    if ((last_updated == 0) || ((now-last_updated) > 1000)) {
+        last_updated = now;
+        mem_stats.Length = sizeof(mem_stats);
+        MmQueryStatistics(&mem_stats);
+    }
+
+    uint32_t frame_dur = tsc_to_us(frame_end_tsc-g_frame_start_tsc);
+    uint32_t f2f = tsc_to_us(g_frame_to_frame_tsc);
+    pb_erase_text_screen();
+    pb_print("   %dx%d | %d.%d mspf | %d.%d msbf | Free %d/%d MiB",
+        g_width, g_height,
+        frame_dur/1000, frame_dur%1000/100,
+        f2f/1000, f2f%1000/100,
+        mem_stats.AvailablePages >> 8, mem_stats.TotalPhysicalPages >> 8);
+    pb_draw_text_screen();
 #endif
 
-        while(pb_busy());
-        while (pb_finished());
-
-#if SHOW_FPS
-        g_frames++;
-        g_frames_total++;
-        g_now = GetTickCount();
-        if ((g_now-g_last) > 1000) {
-            g_fps = g_frames;
-            g_frames = 0;
-            g_last = g_now;
-        }
-#endif
+    while (pb_busy());
+    while (pb_finished());
 }
 
 struct GfxWindowManagerAPI gfx_xbox_wm_api = {
