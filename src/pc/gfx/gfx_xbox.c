@@ -59,10 +59,29 @@ static bool is_pow_2(int x)
     return (x != 0) && ((x & (x - 1)) == 0);
 }
 
+#if SHOW_DBG_INFO
+static uint64_t rdtsc(void)
+{
+    unsigned hi, lo;
+    asm volatile ("rdtsc" : "=d" (hi), "=a" (lo));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static unsigned tsc_to_us(uint64_t tsc)
+{
+    return tsc/733;
+}
+#endif
+
 // XXX: Updated by controller logic
 int g_xbox_exit_button_state;
 
 static int g_width, g_height;
+#if SHOW_DBG_INFO
+static uint64_t g_frame_start_tsc;
+static uint64_t g_frame_to_frame_tsc;
+#endif
+
 
 #define SHADER_POOL_SIZE 64
 
@@ -77,10 +96,6 @@ struct ShaderProgram {
 static struct ShaderProgram g_shader_pool[SHADER_POOL_SIZE];
 static uint8_t g_shader_cnt = 0;
 static struct ShaderProgram *g_cur_shader;
-#if SHOW_DBG_INFO
-static uint64_t g_frame_start_tsc;
-static uint64_t g_frame_to_frame_tsc;
-#endif
 
 #define TEX_POOL_SIZE 512
 #define SWIZZLE_BUF_SIDE_LEN 256
@@ -92,8 +107,8 @@ struct texture {
     uint32_t cms;
     uint32_t cmt;
     bool linear_filter;
-    void *addr;
     bool swizzled;
+    void *addr;
 };
 
 static struct texture g_tex_pool[TEX_POOL_SIZE];
@@ -235,23 +250,6 @@ static struct timespec gfx_xbox_wm_timeadd(
     return t1;
 }
 
-static uint64_t rdtsc(void)
-{
-    unsigned hi, lo;
-    asm volatile ("rdtsc" : "=d" (hi), "=a" (lo));
-    return ((uint64_t)hi << 32) | lo;
-}
-
-static unsigned tsc_to_us(uint64_t tsc)
-{
-    return tsc/733;
-}
-
-static uint64_t us_to_tsc(int us)
-{
-    return us*733;
-}
-
 static void gfx_xbox_wm_swap_buffers_end(void)
 {
     // A naive sync up to run at 30Hz by measuring against the 60Hz native
@@ -310,35 +308,21 @@ int map_shader_item_to_psh_input(int item)
 static void gfx_xbox_renderer_load_shader(struct ShaderProgram *new_prg)
 {
     g_cur_shader = new_prg;
-    struct CCFeatures *cc_feat = &g_cur_shader->cc_features;
+    struct CCFeatures *cc = &g_cur_shader->cc_features;
+    int src[2][4];
 
-    int in_0 = map_shader_item_to_psh_input(cc_feat->c[0][0]);
-    int in_1 = map_shader_item_to_psh_input(cc_feat->c[0][1]);
-    int in_2 = map_shader_item_to_psh_input(cc_feat->c[0][2]);
-    int in_3 = map_shader_item_to_psh_input(cc_feat->c[0][3]);
-
-    int in_0a = map_shader_item_to_psh_input(cc_feat->c[1][0]);
-    int in_1a = map_shader_item_to_psh_input(cc_feat->c[1][1]);
-    int in_2a = map_shader_item_to_psh_input(cc_feat->c[1][2]);
-    int in_3a = map_shader_item_to_psh_input(cc_feat->c[1][3]);
-
-    if (!cc_feat->opt_alpha) {
-        in_0a = in_0;
-        in_1a = in_1;
-        in_2a = in_2;
-        in_3a = in_3;
+    for (int i = 0; i < 4; i++) {
+        src[0][i] = map_shader_item_to_psh_input(cc->c[0][i]);
+        src[1][i] = src[0][i];
+    }
+    if (cc->opt_alpha) {
+        for (int i = 0; i < 4; i++) {
+            src[1][i] = map_shader_item_to_psh_input(cc->c[1][i]);
+        }
     }
 
-    bool in_0a_c = false;
-    bool in_1a_c = false;
-    bool in_2a_c = (cc_feat->c[0][2] == SHADER_TEXEL0A);
-    bool in_3a_c = false;
-
-    int in_fog = 0;
-    if (g_cur_shader->do_fog) {
-        assert(cc_feat->num_inputs < 2);
-        in_fog = PS_REGISTER_V0 + cc_feat->num_inputs;
-    }
+    bool in_2a_c = (cc->c[0][2] == SHADER_TEXEL0A);
+    int fog_src = g_cur_shader->do_fog ? (PS_REGISTER_V0 + cc->num_inputs) : 0;
 
     uint32_t *p = pb_begin();
     pb_push1(p, NV097_SET_SHADER_OTHER_STAGE_INPUT,
@@ -353,9 +337,9 @@ static void gfx_xbox_renderer_load_shader(struct ShaderProgram *new_prg)
         | MASK(NV097_SET_SHADER_STAGE_PROGRAM_STAGE3, NV097_SET_SHADER_STAGE_PROGRAM_STAGE3_PROGRAM_NONE));
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_COLOR_ICW + 0 * 4,
-        MASK(NV097_SET_COMBINER_COLOR_ICW_A_SOURCE, in_0) | MASK(NV097_SET_COMBINER_COLOR_ICW_A_ALPHA, in_0a_c) | MASK(NV097_SET_COMBINER_COLOR_ICW_A_MAP, 0x6)
+        MASK(NV097_SET_COMBINER_COLOR_ICW_A_SOURCE, src[0][0]) | MASK(NV097_SET_COMBINER_COLOR_ICW_A_ALPHA, 0) | MASK(NV097_SET_COMBINER_COLOR_ICW_A_MAP, 0x6)
         | MASK(NV097_SET_COMBINER_COLOR_ICW_B_SOURCE, 0x0) | MASK(NV097_SET_COMBINER_COLOR_ICW_B_ALPHA, 0) | MASK(NV097_SET_COMBINER_COLOR_ICW_B_MAP, 0x1)
-        | MASK(NV097_SET_COMBINER_COLOR_ICW_C_SOURCE, in_1) | MASK(NV097_SET_COMBINER_COLOR_ICW_C_ALPHA, in_1a_c) | MASK(NV097_SET_COMBINER_COLOR_ICW_C_MAP, 0x7)
+        | MASK(NV097_SET_COMBINER_COLOR_ICW_C_SOURCE, src[0][1]) | MASK(NV097_SET_COMBINER_COLOR_ICW_C_ALPHA, 0) | MASK(NV097_SET_COMBINER_COLOR_ICW_C_MAP, 0x7)
         | MASK(NV097_SET_COMBINER_COLOR_ICW_D_SOURCE, 0x0) | MASK(NV097_SET_COMBINER_COLOR_ICW_D_ALPHA, 0) | MASK(NV097_SET_COMBINER_COLOR_ICW_D_MAP, 0x1));
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_COLOR_OCW + 0 * 4,
@@ -368,9 +352,9 @@ static void gfx_xbox_renderer_load_shader(struct ShaderProgram *new_prg)
         | MASK(NV097_SET_COMBINER_COLOR_OCW_OP, NV097_SET_COMBINER_COLOR_OCW_OP_NOSHIFT));
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_ALPHA_ICW + 0 * 4,
-        MASK(NV097_SET_COMBINER_ALPHA_ICW_A_SOURCE, in_0a) | MASK(NV097_SET_COMBINER_ALPHA_ICW_A_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_A_MAP, 0x6)
+        MASK(NV097_SET_COMBINER_ALPHA_ICW_A_SOURCE, src[1][0]) | MASK(NV097_SET_COMBINER_ALPHA_ICW_A_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_A_MAP, 0x6)
         | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_SOURCE, 0x0) | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_MAP, 0x1)
-        | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_SOURCE, in_1a) | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_MAP, 0x7)
+        | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_SOURCE, src[1][1]) | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_MAP, 0x7)
         | MASK(NV097_SET_COMBINER_ALPHA_ICW_D_SOURCE, 0x0) | MASK(NV097_SET_COMBINER_ALPHA_ICW_D_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_D_MAP, 0x1));
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_ALPHA_OCW + 0 * 4,
@@ -382,8 +366,8 @@ static void gfx_xbox_renderer_load_shader(struct ShaderProgram *new_prg)
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_COLOR_ICW + 1 * 4,
         MASK(NV097_SET_COMBINER_COLOR_ICW_A_SOURCE, PS_REGISTER_R1) | MASK(NV097_SET_COMBINER_COLOR_ICW_A_ALPHA, 0) | MASK(NV097_SET_COMBINER_COLOR_ICW_A_MAP, 0x6)
-        | MASK(NV097_SET_COMBINER_COLOR_ICW_B_SOURCE, in_2) | MASK(NV097_SET_COMBINER_COLOR_ICW_B_ALPHA, in_2a_c) | MASK(NV097_SET_COMBINER_COLOR_ICW_B_MAP, 0x6)
-        | MASK(NV097_SET_COMBINER_COLOR_ICW_C_SOURCE, in_3) | MASK(NV097_SET_COMBINER_COLOR_ICW_C_ALPHA, in_3a_c) | MASK(NV097_SET_COMBINER_COLOR_ICW_C_MAP, 0x6)
+        | MASK(NV097_SET_COMBINER_COLOR_ICW_B_SOURCE, src[0][2]) | MASK(NV097_SET_COMBINER_COLOR_ICW_B_ALPHA, in_2a_c) | MASK(NV097_SET_COMBINER_COLOR_ICW_B_MAP, 0x6)
+        | MASK(NV097_SET_COMBINER_COLOR_ICW_C_SOURCE, src[0][3]) | MASK(NV097_SET_COMBINER_COLOR_ICW_C_ALPHA, 0) | MASK(NV097_SET_COMBINER_COLOR_ICW_C_MAP, 0x6)
         | MASK(NV097_SET_COMBINER_COLOR_ICW_D_SOURCE, 0x0) | MASK(NV097_SET_COMBINER_COLOR_ICW_D_ALPHA, 0) | MASK(NV097_SET_COMBINER_COLOR_ICW_D_MAP, 0x1));
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_COLOR_OCW + 1 * 4,
@@ -397,8 +381,8 @@ static void gfx_xbox_renderer_load_shader(struct ShaderProgram *new_prg)
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_ALPHA_ICW + 1 * 4,
         MASK(NV097_SET_COMBINER_ALPHA_ICW_A_SOURCE, PS_REGISTER_R1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_A_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_A_MAP, 0x6)
-        | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_SOURCE, in_2a) | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_MAP, 0x6)
-        | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_SOURCE, in_3a) | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_MAP, 0x6)
+        | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_SOURCE, src[1][2]) | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_B_MAP, 0x6)
+        | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_SOURCE, src[1][3]) | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_C_MAP, 0x6)
         | MASK(NV097_SET_COMBINER_ALPHA_ICW_D_SOURCE, 0x0) | MASK(NV097_SET_COMBINER_ALPHA_ICW_D_ALPHA, 1) | MASK(NV097_SET_COMBINER_ALPHA_ICW_D_MAP, 0x1));
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_ALPHA_OCW + 1 * 4,
@@ -414,8 +398,8 @@ static void gfx_xbox_renderer_load_shader(struct ShaderProgram *new_prg)
         | MASK(NV097_SET_COMBINER_CONTROL_ITERATION_COUNT, 2));
     p += 2;
     pb_push1(p, NV097_SET_COMBINER_SPECULAR_FOG_CW0,
-        MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_A_SOURCE, in_fog) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_A_ALPHA, 1) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_A_INVERSE, 0)
-        | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_B_SOURCE, in_fog) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_B_ALPHA, 0) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_B_INVERSE, 0)
+        MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_A_SOURCE, fog_src) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_A_ALPHA, 1) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_A_INVERSE, 0)
+        | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_B_SOURCE, fog_src) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_B_ALPHA, 0) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_B_INVERSE, 0)
         | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_C_SOURCE, PS_REGISTER_R0) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_C_ALPHA, 0) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_C_INVERSE, 0)
         | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_D_SOURCE, 0x0) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_D_ALPHA, 0) | MASK(NV097_SET_COMBINER_SPECULAR_FOG_CW0_D_INVERSE, 0));
     p += 2;
@@ -428,7 +412,7 @@ static void gfx_xbox_renderer_load_shader(struct ShaderProgram *new_prg)
 
     // FIXME: Noise
 
-    if (cc_feat->opt_texture_edge && cc_feat->opt_alpha) {
+    if (cc->opt_texture_edge && cc->opt_alpha) {
         p = pb_push1(p, NV097_SET_ALPHA_TEST_ENABLE, true);
         p = pb_push1(p, NV097_SET_ALPHA_FUNC, 0x204);
         p = pb_push1(p, NV097_SET_ALPHA_REF,  77);
@@ -448,31 +432,35 @@ static struct ShaderProgram *gfx_xbox_renderer_create_and_load_new_shader(
 
     prg->shader_id = shader_id;
     gfx_cc_get_features(prg->shader_id, &prg->cc_features);
+    struct CCFeatures *cc = &prg->cc_features;
 
-    prg->num_textures = prg->cc_features.used_textures[0]
-                        + prg->cc_features.used_textures[1];
+    prg->num_textures = cc->used_textures[0] + cc->used_textures[1];
+
     // If we are using only 1 tile, make sure its tile 0
-    if (prg->cc_features.used_textures[1]) {
-        assert(prg->cc_features.used_textures[0]);
+    if (cc->used_textures[1]) {
+        assert(cc->used_textures[0]);
     }
 
     size_t num_floats = 4;
-    if (prg->cc_features.used_textures[0]
-        || prg->cc_features.used_textures[1]) {
+    if (prg->num_textures > 0) {
         num_floats += 2;
     }
-    if (prg->cc_features.opt_fog) {
+    if (cc->opt_fog) {
         num_floats += 4;
     }
-    for (int i = 0; i < prg->cc_features.num_inputs; i++) {
-        num_floats += prg->cc_features.opt_alpha ? 4 : 3;
+
+    // Limitation check: we currently only handle at most 2 inputs
+    assert(cc->num_inputs <= 2);
+
+    for (int i = 0; i < cc->num_inputs; i++) {
+        num_floats += cc->opt_alpha ? 4 : 3;
     }
 
     prg->num_floats = num_floats;
 
-    // Only handle fog if we can passthru in one of the vertex color outputs
-    prg->do_fog = (prg->cc_features.num_inputs < 2)
-                  && prg->cc_features.opt_fog;
+    // Limitation check: Only handle fog if we can passthru in one of the vertex
+    // color outputs
+    prg->do_fog = (cc->num_inputs < 2) && cc->opt_fog;
 
     gfx_xbox_renderer_load_shader(prg);
     return prg;
@@ -503,14 +491,14 @@ static uint32_t gfx_xbox_renderer_new_texture(void)
     assert(g_tex_cnt < TEX_POOL_SIZE);
 
     struct texture *tex = &g_tex_pool[g_tex_cnt];
-    tex->addr = NULL;
     tex->width = 0;
     tex->height = 0;
     tex->pitch = 0;
-    tex->linear_filter = false;
     tex->cms = G_TX_CLAMP;
     tex->cmt = G_TX_CLAMP;
+    tex->linear_filter = false;
     tex->swizzled = false;
+    tex->addr = NULL;
 
     return g_tex_cnt++;
 }
@@ -644,8 +632,9 @@ static void gfx_xbox_renderer_set_depth_test(bool depth_test)
 {
     uint32_t *p = pb_begin();
     p = pb_push1(p, NV097_SET_DEPTH_TEST_ENABLE, depth_test);
-    p = pb_push1(p, NV097_SET_STENCIL_TEST_ENABLE, 0);
-    p = pb_push1(p, NV097_SET_DEPTH_FUNC, 3); // LE
+    if (depth_test) {
+        p = pb_push1(p, NV097_SET_DEPTH_FUNC, 3); // LE
+    }
     pb_end(p);
 }
 
@@ -732,6 +721,7 @@ static void gfx_xbox_renderer_init(void)
     p = pb_push1(p, NV097_SET_LIGHTING_ENABLE, 0);
     p = pb_push1(p, NV097_SET_SPECULAR_ENABLE, 1);
     p = pb_push1(p, NV097_SET_DEPTH_TEST_ENABLE, 0);
+    p = pb_push1(p, NV097_SET_STENCIL_TEST_ENABLE, 0);
 #if WIREFRAME
     p = pb_push1(p, NV097_SET_FRONT_POLYGON_MODE,
                     NV097_SET_FRONT_POLYGON_MODE_V_LINE);
@@ -775,12 +765,12 @@ static void gfx_xbox_renderer_draw_triangles(
     size_t buf_vbo_len,
     size_t buf_vbo_num_tris)
 {
+    struct CCFeatures *cc = &g_cur_shader->cc_features;
     size_t size_of_vert = g_cur_shader->num_floats;
     size_t num_vertices = buf_vbo_num_tris * 3;
     assert(num_vertices <= 0xffff);
     assert(g_cur_shader != NULL);
 
-    // FIXME: Restructure loop to not have conditions inside
     uint32_t *p = pb_begin();
     p = pb_push1(p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLES);
     pb_end(p);
@@ -798,8 +788,7 @@ static void gfx_xbox_renderer_draw_triangles(
         position[3] = *vp++;
 
         // TEXTURE COORDS
-        if (g_cur_shader->cc_features.used_textures[0]
-            || g_cur_shader->cc_features.used_textures[1]) {
+        if (g_cur_shader->num_textures > 0) {
             int tex_num = g_tex_bindings[g_last_tile_selected];
             struct texture *tex = &g_tex_pool[tex_num];
             assert(tex->addr != NULL);
@@ -808,7 +797,7 @@ static void gfx_xbox_renderer_draw_triangles(
             // FIXME: TEX0/1 might need to be unnormalized if tex is npot for
             // whatever reason (are textures of different sizes ever mapped?)
             if (!tex->swizzled) {
-                // Linear textures needs unnormalized coords
+                // Linear textures need unnormalized coords
                 tu *= tex->width;
                 tv *= tex->height;
             }
@@ -822,10 +811,9 @@ static void gfx_xbox_renderer_draw_triangles(
         }
 
         // FOG
-        if (g_cur_shader->cc_features.opt_fog) {
-            assert(g_cur_shader->cc_features.num_inputs <= 1);
+        if (cc->opt_fog) {
             if (g_cur_shader->do_fog) {
-                int idx = g_cur_shader->cc_features.num_inputs;
+                int idx = cc->num_inputs;
                 pb_push(p++, NV097_SET_VERTEX_DATA4F_M
                     + (NV2A_VERTEX_ATTR_DIFFUSE + idx)*4*sizeof(float), 4);
                 *(float*)(p++) = *vp++;
@@ -839,19 +827,14 @@ static void gfx_xbox_renderer_draw_triangles(
 
         // INPUTS        
         // FIXME: shader def supports up to four from the verts. This case is
-        // not handled
-        assert(g_cur_shader->cc_features.num_inputs <= 2);
-        for (int i = 0; i < g_cur_shader->cc_features.num_inputs; i++) {
+        // not handled. We check this at shader creation.
+        for (int i = 0; i < cc->num_inputs; i++) {
             pb_push(p++, NV097_SET_VERTEX_DATA4F_M
                 + (NV2A_VERTEX_ATTR_DIFFUSE + i)*4*sizeof(float), 4);
             *(float*)(p++) = *vp++;
             *(float*)(p++) = *vp++;
             *(float*)(p++) = *vp++;
-            if (g_cur_shader->cc_features.opt_alpha) {
-                *(float*)(p++) = *vp++;
-            } else {
-                *(float*)(p++) = 0.0f;
-            }
+            *(float*)(p++) = cc->opt_alpha ? *vp++ : 0.0f;
         }
 
         // POSITION (last, to finish the vertex)
@@ -890,13 +873,13 @@ static void gfx_xbox_renderer_finish_render(void)
         MmQueryStatistics(&mem_stats);
     }
 
-    uint32_t frame_dur = tsc_to_us(frame_end_tsc-g_frame_start_tsc);
-    uint32_t f2f = tsc_to_us(g_frame_to_frame_tsc);
+    uint32_t uspf = tsc_to_us(frame_end_tsc-g_frame_start_tsc);
+    uint32_t usbf = tsc_to_us(g_frame_to_frame_tsc);
     pb_erase_text_screen();
-    pb_print("   %dx%d | %d.%d mspf | %d.%d msbf | Free %d/%d MiB",
+    pb_print("   %dx%d | %d.%d mspf | %d.%d msbf | %d/%d MiB Free",
         g_width, g_height,
-        frame_dur/1000, frame_dur%1000/100,
-        f2f/1000, f2f%1000/100,
+        uspf/1000, uspf%1000/100,
+        usbf/1000, usbf%1000/100,
         mem_stats.AvailablePages >> 8, mem_stats.TotalPhysicalPages >> 8);
     pb_draw_text_screen();
 #endif
